@@ -1,6 +1,9 @@
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+
+mod knowledge;
 
 #[derive(Debug, PartialEq)]
 enum Destination {
@@ -121,40 +124,59 @@ fn write_signal_reply(
     writeln!(writer, "{request}")
 }
 
-fn read_send_ack(reader: &mut impl BufRead, expected_id: u64) -> io::Result<()> {
-    let mut line = String::new();
+fn read_send_ack(
+    reader: &mut impl BufRead,
+    expected_id: u64,
+    pending: &mut VecDeque<IncomingMessage>,
+) -> io::Result<()> {
+    loop {
+        let mut line = String::new();
 
-    if reader.read_line(&mut line)? == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "Socket closed before acknowledgment",
-        ));
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Socket closed before acknowledgment",
+            ));
+        }
+
+        let response: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+        // Another notification arrived before acknowledgment
+        if response["method"] == "receive" {
+            if response.pointer("/params/envelope/dataMessage").is_some() {
+                let message = parse_signal_notification(&line).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Invalid Signal data message")
+                })?;
+
+                pending.push_back(message);
+            }
+
+            continue;
+        }
+
+        if response["jsonrpc"] != "2.0" || response["id"].as_u64() != Some(expected_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unexpected JSON-RPC response",
+            ));
+        }
+
+        if let Some(error) = response.get("error") {
+            return Err(io::Error::other(format!(
+                "Signal daemon rejected send: {error}"
+            )));
+        }
+
+        if response.get("result").is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Missing JSON-RPC result",
+            ));
+        }
+
+        return Ok(());
     }
-
-    let response: serde_json::Value = serde_json::from_str(&line)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-
-    if response["jsonrpc"] != "2.0" || response["id"].as_u64() != Some(expected_id) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Unexpected JSON-RPC response",
-        ));
-    }
-
-    if let Some(error) = response.get("error") {
-        return Err(io::Error::other(format!(
-            "Signal daemon rejected send: {error}"
-        )));
-    }
-
-    if response.get("result").is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Missing JSON-RPC result",
-        ));
-    }
-
-    Ok(())
 }
 
 fn run_mock_daemon(path: &Path) -> io::Result<()> {
@@ -165,9 +187,7 @@ fn run_mock_daemon(path: &Path) -> io::Result<()> {
     let (socket, _) = listener.accept()?;
     let mut reader = BufReader::new(socket);
 
-    for (index, text) in ["ping", "/help"].into_iter().enumerate() {
-        let request_id = index as u64 + 1;
-        // Simulate an incoming Signal message.
+    for text in ["ping", "/help"] {
         let notification = serde_json::json!({
             "method": "receive",
             "params": {
@@ -181,8 +201,15 @@ fn run_mock_daemon(path: &Path) -> io::Result<()> {
         });
 
         writeln!(reader.get_mut(), "{notification}")?;
+    }
 
-        // Receive the bot's JSON-RPC send request.
+    println!("Mock daemon sent both notifications");
+
+    for (index, expected_message) in ["pong", "Available commands: /help, ping"]
+        .into_iter()
+        .enumerate()
+    {
+        let request_id = index as u64 + 1;
         let mut line = String::new();
 
         if reader.read_line(&mut line)? == 0 {
@@ -198,6 +225,7 @@ fn run_mock_daemon(path: &Path) -> io::Result<()> {
         if request["jsonrpc"] != "2.0"
             || request["method"] != "send"
             || request["id"].as_u64() != Some(request_id)
+            || request["params"]["message"] != expected_message
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -227,11 +255,18 @@ fn run_socket_client(path: &Path) -> io::Result<()> {
     let socket = UnixStream::connect(path)?;
     let mut reader = BufReader::new(socket);
     let mut next_request_id: u64 = 1;
+    let mut pending = VecDeque::new();
 
     loop {
-        let Some(incoming) = read_signal_message(&mut reader)? else {
-            println!("Daemon disconnected");
-            break;
+        let incoming = if let Some(message) = pending.pop_front() {
+            message
+        } else {
+            let Some(message) = read_signal_message(&mut reader)? else {
+                println!("Daemon disconnected");
+                break;
+            };
+
+            message
         };
 
         let outgoing = handle_message(&incoming);
@@ -240,10 +275,9 @@ fn run_socket_client(path: &Path) -> io::Result<()> {
         println!("Reply: {}", outgoing.text);
 
         write_signal_reply(reader.get_mut(), "mock-account", &outgoing, next_request_id)?;
-        read_send_ack(&mut reader, next_request_id)?;
-        next_request_id += 1;
-
+        read_send_ack(&mut reader, next_request_id, &mut pending)?;
         println!("Mock daemon acknowledged send");
+        next_request_id += 1;
     }
 
     Ok(())
@@ -256,6 +290,149 @@ fn main() {
         eprintln!(
             "Usage: signal-knowledge-bot <message | --signal-json | --mock-daemon | --socket-client>"
         );
+        return;
+    }
+
+    if args[0] == "--search-dir" {
+        if args.len() < 3 {
+            eprintln!("Usage: signal-knowledge-bot --search-dir <directory> <question>");
+            return;
+        }
+
+        let directory = Path::new(&args[1]);
+        let question = args[2..].join(" ");
+
+        const MAX_PAGES: usize = 5;
+        const MAX_CONTEXT_CHARS: usize = 20_000;
+
+        match knowledge::load_pdf_directory(directory) {
+            Ok(documents) => {
+                println!("Loaded {} PDF documents", documents.len());
+
+                let ranked = knowledge::search_documents(&documents, &question, MAX_PAGES);
+
+                let context = knowledge::build_bounded_page_context(&ranked, MAX_CONTEXT_CHARS);
+
+                if context.pages.is_empty() {
+                    println!("No matching pages fit the context budget.");
+                    return;
+                }
+
+                println!("Question: {question}");
+
+                for result in &context.pages {
+                    println!(
+                        "  {} | PDF page {} | Score {}",
+                        result.document.path.display(),
+                        result.page.number,
+                        result.score
+                    );
+                }
+
+                println!(
+                    "LLM context: {} complete pages, {} characters",
+                    context.pages.len(),
+                    context.text.chars().count()
+                );
+
+                if context.pages.len() < ranked.len() {
+                    println!("Some matching pages were excluded by the context budget.");
+                }
+            }
+            Err(error) => eprintln!("Document loading failed: {error}"),
+        }
+
+        return;
+    }
+
+    if args[0] == "--search-pdf" {
+        if args.len() < 3 {
+            eprintln!("Usage: signal-knowledge-bot --search-pdf <file.pdf> <question>");
+            return;
+        }
+
+        let path = Path::new(&args[1]);
+        let question = args[2..].join(" ");
+
+        match knowledge::load_pdf(path) {
+            Ok(document) => {
+                let results = knowledge::search_pages(&document, &question, 3);
+
+                if results.is_empty() {
+                    println!("No matching pages found.");
+                    return;
+                }
+
+                println!("Question: {question}");
+                println!("Relevant pages:");
+
+                for result in &results {
+                    println!(
+                        "  PDF page {} (score: {})",
+                        result.page.number, result.score
+                    );
+                }
+
+                let context = knowledge::build_page_context(&document, &results);
+
+                println!(
+                    "LLM context prepared: {} complete pages, {} characters",
+                    results.len(),
+                    context.chars().count()
+                );
+            }
+            Err(error) => {
+                eprintln!("PDF search failed: {error}");
+            }
+        }
+
+        return;
+    }
+
+    if args[0] == "--inspect-pdf" {
+        let Some(path) = args.get(1) else {
+            eprintln!("Usage: signal-knowledge-bot --inspect-pdf <file.pdf>");
+            return;
+        };
+
+        match knowledge::load_pdf(Path::new(path)) {
+            Ok(document) => {
+                println!("Document: {}", document.path.display());
+                println!("Total pages: {}", document.pages.len());
+
+                let text_pages = document
+                    .pages
+                    .iter()
+                    .filter(|page| !page.text.trim().is_empty())
+                    .count();
+
+                println!("Pages containing text: {text_pages}");
+
+                for page in document
+                    .pages
+                    .iter()
+                    .filter(|page| !page.text.trim().is_empty())
+                    .take(3)
+                {
+                    let preview = page
+                        .text
+                        .split_whitespace()
+                        .take(30)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    println!("Page {}: {preview}...", page.number);
+                }
+
+                if text_pages == 0 {
+                    eprintln!("No extractable text found. The PDF may require OCR.");
+                }
+            }
+            Err(error) => {
+                eprintln!("PDF extraction failed: {error}");
+            }
+        }
+
         return;
     }
 
@@ -510,17 +687,34 @@ mod tests {
     #[test]
     fn validates_send_acknowledgments() {
         let success = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let mut pending = VecDeque::new();
         let mut reader = io::Cursor::new(format!("{success}\n"));
-
-        assert!(read_send_ack(&mut reader, 1).is_ok());
-
+        assert!(read_send_ack(&mut reader, 1, &mut pending).is_ok());
         let failure = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Send failed"}}"#;
-
         let mut reader = io::Cursor::new(format!("{failure}\n"));
-
-        let error = read_send_ack(&mut reader, 1).unwrap_err();
-
+        let error = read_send_ack(&mut reader, 1, &mut pending).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(error.to_string().contains("Send failed"));
+
+        // A message arrives before the acknowledgment.
+        let notification = serde_json::json!({
+            "method": "receive",
+            "params": {
+                "envelope": {
+                    "sourceNumber": "+15550000002",
+                    "dataMessage": {
+                        "message": "/help"
+                    }
+                }
+            }
+        });
+
+        let input = format!("{notification}\n{success}\n");
+        let mut reader = io::Cursor::new(input);
+        read_send_ack(&mut reader, 1, &mut pending).unwrap();
+        let message = pending.pop_front().expect("Expected queued message");
+        assert_eq!(message.sender, "+15550000002");
+        assert_eq!(message.text, "/help");
+        assert!(pending.is_empty());
     }
 }
