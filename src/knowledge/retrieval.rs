@@ -1,19 +1,8 @@
+use super::{PdfDocument, PdfPage};
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
-use std::path::{Path, PathBuf};
 
 const CHUNK_WORDS: usize = 180;
 const CHUNK_OVERLAP: usize = 30;
-
-pub struct PdfPage {
-    pub number: usize,
-    pub text: String,
-}
-
-pub struct PdfDocument {
-    pub path: PathBuf,
-    pub pages: Vec<PdfPage>,
-}
 
 pub struct DocumentChunk {
     pub page_number: usize,
@@ -25,24 +14,19 @@ pub struct RetrievedPage<'a> {
     pub score: usize,
 }
 
-pub fn load_pdf(path: &Path) -> Result<PdfDocument, Box<dyn Error>> {
-    let extracted_pages = pdf_extract::extract_text_by_pages(path)?;
-
-    let pages = extracted_pages
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| PdfPage {
-            number: index + 1,
-            text,
-        })
-        .collect();
-
-    Ok(PdfDocument {
-        path: path.to_path_buf(),
-        pages,
-    })
+#[derive(Clone, Copy)]
+pub struct RetrievedDocumentPage<'a> {
+    pub document: &'a PdfDocument,
+    pub page: &'a PdfPage,
+    pub score: usize,
 }
 
+pub struct PageContext<'a> {
+    pub text: String,
+    pub pages: Vec<RetrievedDocumentPage<'a>>,
+}
+
+// overlapping searchable chunks.
 pub fn chunk_document(document: &PdfDocument) -> Vec<DocumentChunk> {
     let mut chunks = Vec::new();
 
@@ -69,7 +53,7 @@ pub fn chunk_document(document: &PdfDocument) -> Vec<DocumentChunk> {
     chunks
 }
 
-// A simple keyword baseline, not semantic search.
+// keyword extraction for retrieval baseline.
 fn keywords(text: &str) -> HashSet<String> {
     text.to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
@@ -109,14 +93,12 @@ pub fn search_pages<'a>(
     for chunk in chunk_document(document) {
         let chunk_terms = keywords(&chunk.text);
 
-        // Count distinct query terms found in this chunk.
         let score = query_terms.intersection(&chunk_terms).count();
 
         if score == 0 {
             continue;
         }
 
-        // Keep the highest chunk score for each page.
         page_scores
             .entry(chunk.page_number)
             .and_modify(|best| *best = (*best).max(score))
@@ -125,7 +107,7 @@ pub fn search_pages<'a>(
 
     let mut ranked: Vec<(usize, usize)> = page_scores.into_iter().collect();
 
-    // Highest score first; page number breaks ties.
+    // highest score first; page number breaks ties.
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     ranked
@@ -139,58 +121,6 @@ pub fn search_pages<'a>(
                 .map(|page| RetrievedPage { page, score })
         })
         .collect()
-}
-
-pub fn build_page_context(document: &PdfDocument, pages: &[RetrievedPage<'_>]) -> String {
-    let mut context = String::new();
-
-    for result in pages {
-        context.push_str(&format!(
-            "[Document: {} | PDF page {}]\n",
-            document.path.display(),
-            result.page.number
-        ));
-
-        // Include the ENTIRE original page, not the matching chunk.
-        context.push_str(&result.page.text);
-        context.push_str("\n\n");
-    }
-
-    context
-}
-
-pub fn load_pdf_directory(directory: &Path) -> Result<Vec<PdfDocument>, Box<dyn Error>> {
-    let mut paths = std::fs::read_dir(directory)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Only load PDF files, in a predictable order.
-    paths.retain(|path| {
-        path.is_file()
-            && path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-    });
-
-    paths.sort();
-
-    if paths.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No PDF files found in directory",
-        )
-        .into());
-    }
-
-    paths.into_iter().map(|path| load_pdf(&path)).collect()
-}
-
-#[derive(Clone, Copy)]
-pub struct RetrievedDocumentPage<'a> {
-    pub document: &'a PdfDocument,
-    pub page: &'a PdfPage,
-    pub score: usize,
 }
 
 pub fn search_documents<'a>(
@@ -210,7 +140,6 @@ pub fn search_documents<'a>(
         }
     }
 
-    // Rank all matching pages, regardless of which PDF they came from.
     results.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -222,9 +151,21 @@ pub fn search_documents<'a>(
     results
 }
 
-pub struct PageContext<'a> {
-    pub text: String,
-    pub pages: Vec<RetrievedDocumentPage<'a>>,
+pub fn build_page_context(document: &PdfDocument, pages: &[RetrievedPage<'_>]) -> String {
+    let mut context = String::new();
+
+    for result in pages {
+        context.push_str(&format!(
+            "[Document: {} | PDF page {}]\n",
+            document.path.display(),
+            result.page.number
+        ));
+
+        context.push_str(&result.page.text);
+        context.push_str("\n\n");
+    }
+
+    context
 }
 
 pub fn build_bounded_page_context<'a>(
@@ -245,7 +186,6 @@ pub fn build_bounded_page_context<'a>(
 
         let entry_chars = entry.chars().count();
 
-        // Never truncate a page to fit the budget.
         if entry_chars > max_chars.saturating_sub(used_chars) {
             continue;
         }
@@ -264,6 +204,7 @@ pub fn build_bounded_page_context<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn retrieval_uses_chunks_but_returns_complete_pages() {
@@ -294,16 +235,14 @@ mod tests {
 
         let chunks = chunk_document(&document);
 
-        // Three overlapping chunks on page 1, one on page 3.
         assert_eq!(chunks.len(), 4);
 
         let first: Vec<_> = chunks[0].text.split_whitespace().collect();
+
         let second: Vec<_> = chunks[1].text.split_whitespace().collect();
 
         assert_eq!(&first[150..], &second[..30]);
 
-        // Page 3 matches both query terms in one chunk.
-        // Page 1 has matches in different chunks.
         let results = search_pages(&document, "vehicle authorization", 3);
 
         assert_eq!(results.len(), 2);
@@ -312,13 +251,10 @@ mod tests {
 
         let context = build_page_context(&document, &results);
 
-        // We get the original full page, not just a chunk.
         assert!(context.contains(&long_page));
 
-        // Each selected page appears only once.
         assert_eq!(context.matches("[Document:").count(), 2);
 
-        // Unrelated questions produce no matches.
         assert!(search_pages(&document, "helicopter", 3).is_empty());
     }
 
@@ -361,7 +297,6 @@ mod tests {
         assert_eq!(ranked[0].page.number, 2);
         assert_eq!(ranked[1].document.path, PathBuf::from("b.pdf"));
 
-        // Budget enough space for only the first full page.
         let first_entry = format!("[Document: a.pdf | PDF page 2]\n{}\n\n", complete_page);
 
         let context = build_bounded_page_context(&ranked, first_entry.chars().count());
@@ -369,11 +304,10 @@ mod tests {
         assert_eq!(context.pages.len(), 1);
         assert_eq!(context.text, first_entry);
 
-        // Even text beyond the 180-word chunk boundary is present.
         assert!(context.text.contains("final-exception"));
 
-        // A page must not be truncated to fit a tiny budget.
         let too_small = build_bounded_page_context(&ranked, 10);
+
         assert!(too_small.pages.is_empty());
     }
 }
