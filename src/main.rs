@@ -3,6 +3,7 @@ mod knowledge;
 mod signal;
 
 use std::path::Path;
+use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -142,6 +143,16 @@ fn main() {
             let directory = Path::new(&args[1]);
             let question = args[2..].join(" ");
 
+            let terminology = match knowledge::Terminology::load_optional(directory) {
+                Ok(terminology) => terminology,
+                Err(error) => {
+                    eprintln!("Failed to load terminology: {error}");
+                    return;
+                }
+            };
+
+            let expanded_question = terminology.expand(&question);
+
             const MAX_PAGES: usize = 5;
             const MAX_CONTEXT_CHARS: usize = 20_000;
 
@@ -149,7 +160,8 @@ fn main() {
                 Ok(documents) => {
                     println!("Loaded {} PDF documents", documents.len());
 
-                    let ranked = knowledge::search_documents(&documents, &question, MAX_PAGES);
+                    let ranked =
+                        knowledge::search_documents(&documents, &expanded_question, MAX_PAGES);
 
                     let context = knowledge::build_bounded_page_context(&ranked, MAX_CONTEXT_CHARS);
 
@@ -159,6 +171,10 @@ fn main() {
                     }
 
                     println!("Question: {question}");
+
+                    if expanded_question != question {
+                        println!("Expanded query: {expanded_question}");
+                    }
 
                     for result in &context.pages {
                         println!(
@@ -180,6 +196,99 @@ fn main() {
                     }
                 }
                 Err(error) => eprintln!("Document loading failed: {error}"),
+            }
+        }
+
+        "--eval-retrieval" => {
+            if args.len() != 3 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --eval-retrieval <manuals-dir> <evaluation.json>"
+                );
+                return;
+            }
+
+            let directory = Path::new(&args[1]);
+            let cases_path = Path::new(&args[2]);
+
+            if let Err(error) = knowledge::run_evaluation(directory, cases_path) {
+                eprintln!("Retrieval evaluation failed: {error}");
+            }
+        }
+
+        "--build-index" => {
+            if args.len() != 3 {
+                eprintln!("Usage: signal-knowledge-bot --build-index <manuals-dir> <database.db>");
+                return;
+            }
+
+            let started = Instant::now();
+
+            match knowledge::SqliteIndex::build(Path::new(&args[1]), Path::new(&args[2])) {
+                Ok((documents, chunks)) => {
+                    println!("SQLite index saved: {}", args[2]);
+                    println!("Documents: {documents}");
+                    println!("Searchable chunks: {chunks}");
+                    println!("Indexing time: {:?}", started.elapsed());
+                }
+                Err(error) => eprintln!("Indexing failed: {error}"),
+            }
+        }
+
+        "--search-index" => {
+            if args.len() < 3 {
+                eprintln!("Usage: signal-knowledge-bot --search-index <database.db> <question>");
+                return;
+            }
+
+            let load_start = Instant::now();
+
+            let index = match knowledge::SqliteIndex::open(Path::new(&args[1])) {
+                Ok(index) => index,
+                Err(error) => {
+                    eprintln!("Failed to open index: {error}");
+                    return;
+                }
+            };
+
+            let load_time = load_start.elapsed();
+            let search_start = Instant::now();
+
+            match index.search(&args[2..].join(" "), 5, 20_000) {
+                Ok(results) => {
+                    println!("Expanded query: {}", results.expanded_question);
+
+                    for page in &results.pages {
+                        println!(
+                            "  {} | PDF page {} | BM25 rank {:.5}",
+                            page.source, page.page_number, page.rank
+                        );
+                    }
+
+                    println!(
+                        "LLM context: {} complete pages, {} characters",
+                        results.pages.len(),
+                        results.context.chars().count()
+                    );
+                }
+                Err(error) => eprintln!("Index search failed: {error}"),
+            }
+
+            println!("Index load time: {load_time:?}");
+            println!("Search and context time: {:?}", search_start.elapsed());
+        }
+
+        "--eval-index" => {
+            if args.len() != 3 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --eval-index <database.db> <evaluation.json>"
+                );
+                return;
+            }
+
+            if let Err(error) =
+                knowledge::run_index_evaluation(Path::new(&args[1]), Path::new(&args[2]))
+            {
+                eprintln!("SQLite evaluation failed: {error}");
             }
         }
 

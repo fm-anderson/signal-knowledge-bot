@@ -2,10 +2,21 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 mod retrieval;
-
 pub use retrieval::{
     build_bounded_page_context, build_page_context, search_documents, search_pages,
 };
+
+mod terminology;
+pub use terminology::Terminology;
+
+mod evaluation;
+pub use evaluation::{run_evaluation, run_index_evaluation};
+
+mod index;
+pub use index::SqliteIndex;
+
+mod concepts;
+pub use concepts::ConceptRules;
 
 pub struct PdfPage {
     pub number: usize,

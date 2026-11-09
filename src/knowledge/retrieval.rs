@@ -54,7 +54,7 @@ pub fn chunk_document(document: &PdfDocument) -> Vec<DocumentChunk> {
 }
 
 // keyword extraction for retrieval baseline.
-fn keywords(text: &str) -> HashSet<String> {
+pub(super) fn keywords(text: &str) -> HashSet<String> {
     text.to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| {
