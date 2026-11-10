@@ -26,12 +26,43 @@ pub struct PageContext<'a> {
     pub pages: Vec<RetrievedDocumentPage<'a>>,
 }
 
-// overlapping searchable chunks.
+pub(super) fn normalize_retrieval_text(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if matches!(character, '.' | '…') {
+            let mut run = String::new();
+            run.push(character);
+
+            while let Some(&next) = characters.peek() {
+                if !matches!(next, '.' | '…') {
+                    break;
+                }
+
+                run.push(next);
+                characters.next();
+            }
+
+            if run.chars().count() >= 3 {
+                cleaned.push(' ');
+            } else {
+                cleaned.push_str(&run);
+            }
+        } else {
+            cleaned.push(character);
+        }
+    }
+
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn chunk_document(document: &PdfDocument) -> Vec<DocumentChunk> {
     let mut chunks = Vec::new();
 
     for page in &document.pages {
-        let words: Vec<&str> = page.text.split_whitespace().collect();
+        let normalized = normalize_retrieval_text(&page.text);
+        let words: Vec<&str> = normalized.split_whitespace().collect();
         let mut start = 0;
 
         while start < words.len() {
@@ -53,12 +84,12 @@ pub fn chunk_document(document: &PdfDocument) -> Vec<DocumentChunk> {
     chunks
 }
 
-// keyword extraction for retrieval baseline.
 pub(super) fn keywords(text: &str) -> HashSet<String> {
     text.to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| {
-            word.len() >= 3
+            !word.is_empty()
+                && (word.len() >= 3 || word.chars().all(|character| character.is_ascii_digit()))
                 && !matches!(
                     *word,
                     "the"
@@ -76,6 +107,60 @@ pub(super) fn keywords(text: &str) -> HashSet<String> {
         })
         .map(str::to_string)
         .collect()
+}
+
+pub(super) fn fts_query(text: &str) -> Option<String> {
+    let lowercase = text.to_lowercase();
+    let words: Vec<&str> = lowercase
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    let mut terms = HashSet::new();
+    let mut remaining_words = Vec::new();
+    let mut position = 0;
+
+    while position < words.len() {
+        let prefix = words[position];
+
+        if matches!(prefix, "sf" | "dd" | "af" | "daf") {
+            let mut number_position = position + 1;
+
+            if words.get(number_position) == Some(&"form") {
+                number_position += 1;
+            }
+
+            if let Some(&number) = words.get(number_position)
+                && number.chars().all(|character| character.is_ascii_digit())
+            {
+                terms.insert(format!("{prefix} {number}"));
+                terms.insert(format!("{prefix} form {number}"));
+
+                position = number_position + 1;
+                continue;
+            }
+        }
+
+        remaining_words.push(words[position]);
+        position += 1;
+    }
+
+    terms.extend(keywords(&remaining_words.join(" ")));
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut terms: Vec<String> = terms.into_iter().collect();
+    terms.sort();
+
+    Some(
+        terms
+            .iter()
+            .map(|term| format!("\"{term}\""))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
 }
 
 pub fn search_pages<'a>(
@@ -198,116 +283,5 @@ pub fn build_bounded_page_context<'a>(
     PageContext {
         text: context,
         pages: selected,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn retrieval_uses_chunks_but_returns_complete_pages() {
-        let filler = (0..400)
-            .map(|i| format!("filler{i}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let long_page = format!("vehicle {filler} authorization");
-
-        let document = PdfDocument {
-            path: PathBuf::from("policy.pdf"),
-            pages: vec![
-                PdfPage {
-                    number: 1,
-                    text: long_page.clone(),
-                },
-                PdfPage {
-                    number: 2,
-                    text: String::new(),
-                },
-                PdfPage {
-                    number: 3,
-                    text: "Vehicle authorization requirements.".to_string(),
-                },
-            ],
-        };
-
-        let chunks = chunk_document(&document);
-
-        assert_eq!(chunks.len(), 4);
-
-        let first: Vec<_> = chunks[0].text.split_whitespace().collect();
-
-        let second: Vec<_> = chunks[1].text.split_whitespace().collect();
-
-        assert_eq!(&first[150..], &second[..30]);
-
-        let results = search_pages(&document, "vehicle authorization", 3);
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].page.number, 3);
-        assert_eq!(results[1].page.number, 1);
-
-        let context = build_page_context(&document, &results);
-
-        assert!(context.contains(&long_page));
-
-        assert_eq!(context.matches("[Document:").count(), 2);
-
-        assert!(search_pages(&document, "helicopter", 3).is_empty());
-    }
-
-    #[test]
-    fn searches_multiple_documents_with_complete_page_budget() {
-        let filler = (0..220)
-            .map(|i| format!("filler{i}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let complete_page = format!("vehicle authorization {filler} final-exception");
-
-        let documents = vec![
-            PdfDocument {
-                path: PathBuf::from("a.pdf"),
-                pages: vec![
-                    PdfPage {
-                        number: 1,
-                        text: "vehicle maintenance".to_string(),
-                    },
-                    PdfPage {
-                        number: 2,
-                        text: complete_page.clone(),
-                    },
-                ],
-            },
-            PdfDocument {
-                path: PathBuf::from("b.pdf"),
-                pages: vec![PdfPage {
-                    number: 1,
-                    text: "vehicle authorization limitations".to_string(),
-                }],
-            },
-        ];
-
-        let ranked = search_documents(&documents, "vehicle authorization", 2);
-
-        assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].document.path, PathBuf::from("a.pdf"));
-        assert_eq!(ranked[0].page.number, 2);
-        assert_eq!(ranked[1].document.path, PathBuf::from("b.pdf"));
-
-        let first_entry = format!("[Document: a.pdf | PDF page 2]\n{}\n\n", complete_page);
-
-        let context = build_bounded_page_context(&ranked, first_entry.chars().count());
-
-        assert_eq!(context.pages.len(), 1);
-        assert_eq!(context.text, first_entry);
-
-        assert!(context.text.contains("final-exception"));
-
-        let too_small = build_bounded_page_context(&ranked, 10);
-
-        assert!(too_small.pages.is_empty());
     }
 }

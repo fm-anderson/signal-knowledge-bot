@@ -72,9 +72,7 @@ pub fn run_mock_daemon(path: &Path) -> io::Result<()> {
     }
 
     println!("Mock daemon completed both exchanges");
-
     std::fs::remove_file(path)?;
-
     Ok(())
 }
 
@@ -103,11 +101,9 @@ pub fn run_socket_client(path: &Path) -> io::Result<()> {
         println!("Reply: {}", outgoing.text);
 
         write_signal_reply(reader.get_mut(), "mock-account", &outgoing, next_request_id)?;
-
         read_send_ack(&mut reader, next_request_id, &mut pending)?;
 
         println!("Mock daemon acknowledged send");
-
         next_request_id += 1;
     }
 

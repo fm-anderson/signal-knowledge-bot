@@ -18,6 +18,9 @@ pub use index::SqliteIndex;
 mod concepts;
 pub use concepts::ConceptRules;
 
+pub const MAX_PAGES: usize = 10;
+pub const MAX_CONTEXT_CHARS: usize = 20_000;
+
 pub struct PdfPage {
     pub number: usize,
     pub text: String,
@@ -71,3 +74,6 @@ pub fn load_pdf_directory(directory: &Path) -> Result<Vec<PdfDocument>, Box<dyn 
 
     paths.into_iter().map(|path| load_pdf(&path)).collect()
 }
+
+#[cfg(test)]
+mod tests;

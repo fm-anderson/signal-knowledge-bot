@@ -12,7 +12,7 @@ pub struct Terminology {
 }
 
 impl Terminology {
-    fn from_json(content: &str) -> Result<Self, serde_json::Error> {
+    pub(super) fn from_json(content: &str) -> Result<Self, serde_json::Error> {
         let aliases = serde_json::from_str(content)?;
 
         Ok(Self { aliases })
@@ -86,65 +86,4 @@ fn contains_phrase(haystack: &[String], needle: &[String]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::knowledge::{PdfDocument, PdfPage, search_documents};
-    use std::path::PathBuf;
-
-    #[test]
-    fn terminology_expansion_improves_retrieval() {
-        let terminology = Terminology::from_json(
-            r#"{
-                "gov": [
-                    "government vehicle",
-                    "government motor vehicle",
-                    "government vehicle"
-                ],
-                "vehicle dispatch": [
-                    "transportation dispatch",
-                    "motor vehicle dispatch"
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let documents = vec![PdfDocument {
-            path: PathBuf::from("policy.pdf"),
-            pages: vec![PdfPage {
-                number: 1,
-                text: "Government motor vehicles require authorization.".to_string(),
-            }],
-        }];
-
-        assert!(search_documents(&documents, "GOV", 3).is_empty());
-
-        let expanded = terminology.expand("Can I use a GOV?");
-
-        assert_eq!(
-            expanded,
-            "Can I use a GOV? government vehicle government motor vehicle"
-        );
-
-        let results = search_documents(&documents, &expanded, 3);
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].page.number, 1);
-
-        assert_eq!(
-            terminology.expand("How does VEHICLE-DISPATCH work?"),
-            "How does VEHICLE-DISPATCH work? transportation dispatch motor vehicle dispatch"
-        );
-
-        assert_eq!(terminology.expand("governor"), "governor");
-
-        assert_eq!(
-            terminology.expand("GOV government vehicle"),
-            "GOV government vehicle government motor vehicle"
-        );
-
-        assert!(Terminology::from_json(r#"{"gov":"government vehicle"}"#).is_err());
-    }
 }

@@ -1,4 +1,4 @@
-use super::retrieval::{chunk_document, keywords};
+use super::retrieval::{chunk_document, fts_query};
 use super::{ConceptRules, PdfDocument, Terminology, load_pdf_directory};
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -97,19 +97,9 @@ impl SqliteIndex {
             return Ok(result);
         }
 
-        let mut terms: Vec<String> = keywords(&expanded_question).into_iter().collect();
-
-        terms.sort();
-
-        if terms.is_empty() {
+        let Some(query) = fts_query(&expanded_question) else {
             return Ok(result);
-        }
-
-        let query = terms
-            .iter()
-            .map(|term| format!("\"{term}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        };
 
         let mut statement = self.connection.prepare(
             "SELECT chunks.page_id, chunks_fts.rank
@@ -173,7 +163,7 @@ impl SqliteIndex {
     }
 }
 
-fn write_database(
+pub(super) fn write_database(
     connection: &mut Connection,
     documents: &[PdfDocument],
     terminology: &Terminology,
@@ -283,75 +273,4 @@ fn write_database(
     transaction.commit()?;
 
     Ok(total_chunks)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::knowledge::PdfPage;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn sqlite_index_retrieves_complete_pages() {
-        let filler = (0..220)
-            .map(|i| format!("word{i}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let complete_page = format!("government vehicle {filler} authorization");
-
-        let documents = vec![PdfDocument {
-            path: PathBuf::from("policy.pdf"),
-            pages: vec![
-                PdfPage {
-                    number: 1,
-                    text: complete_page.clone(),
-                },
-                PdfPage {
-                    number: 2,
-                    text: "Unrelated material.".to_string(),
-                },
-            ],
-        }];
-
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-
-        let path =
-            std::env::temp_dir().join(format!("signal-index-{}-{unique}.db", std::process::id()));
-
-        let mut connection = Connection::open(&path).unwrap();
-
-        let count = write_database(
-            &mut connection,
-            &documents,
-            &Terminology::default(),
-            &ConceptRules::default(),
-        )
-        .unwrap();
-
-        assert_eq!(count, 3);
-
-        drop(connection);
-
-        let index = SqliteIndex::open(&path).unwrap();
-
-        let result = index.search("vehicle authorization", 5, 10_000).unwrap();
-
-        assert_eq!(result.pages.len(), 1);
-        assert_eq!(result.pages[0].page_number, 1);
-        assert_eq!(result.context.matches("[Document:").count(), 1);
-
-        assert!(result.context.contains(&complete_page));
-
-        let too_small = index.search("vehicle authorization", 5, 10).unwrap();
-
-        assert!(too_small.pages.is_empty());
-
-        drop(index);
-        std::fs::remove_file(path).unwrap();
-    }
 }

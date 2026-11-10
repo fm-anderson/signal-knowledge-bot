@@ -153,8 +153,7 @@ fn main() {
 
             let expanded_question = terminology.expand(&question);
 
-            const MAX_PAGES: usize = 5;
-            const MAX_CONTEXT_CHARS: usize = 20_000;
+            use knowledge::{MAX_CONTEXT_CHARS, MAX_PAGES};
 
             match knowledge::load_pdf_directory(directory) {
                 Ok(documents) => {
@@ -253,7 +252,11 @@ fn main() {
             let load_time = load_start.elapsed();
             let search_start = Instant::now();
 
-            match index.search(&args[2..].join(" "), 5, 20_000) {
+            match index.search(
+                &args[2..].join(" "),
+                knowledge::MAX_PAGES,
+                knowledge::MAX_CONTEXT_CHARS,
+            ) {
                 Ok(results) => {
                     println!("Expanded query: {}", results.expanded_question);
 
