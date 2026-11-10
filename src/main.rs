@@ -1,5 +1,6 @@
 mod bot;
 mod knowledge;
+mod llm;
 mod signal;
 
 use std::path::Path;
@@ -16,22 +17,67 @@ fn main() {
     };
 
     match command {
-        "--mock-daemon" | "--socket-client" => {
-            let Some(path) = args.get(1) else {
-                eprintln!("Missing socket path");
-                return;
+        "--mock-daemon" => {
+            if args.len() != 2 {
+                eprintln!("Usage: signal-knowledge-bot --mock-daemon <socket-path>");
+                std::process::exit(1);
+            }
+
+            if let Err(error) = signal::run_mock_daemon(Path::new(&args[1])) {
+                eprintln!("Mock daemon error: {error}");
+                std::process::exit(1);
+            }
+        }
+
+        "--socket-client" => {
+            if args.len() != 3 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --socket-client <socket-path> <database.db>"
+                );
+                std::process::exit(1);
+            }
+
+            let instructions = load_answering_instructions();
+
+            let index = match knowledge::SqliteIndex::open(Path::new(&args[2])) {
+                Ok(index) => index,
+                Err(error) => {
+                    eprintln!("Failed to open index: {error}");
+                    std::process::exit(1);
+                }
             };
 
-            let path = Path::new(path);
+            let model = llm::Agy;
 
-            let result = if command == "--mock-daemon" {
-                signal::run_mock_daemon(path)
-            } else {
-                signal::run_socket_client(path)
-            };
+            let result = signal::run_socket_client(Path::new(&args[1]), |incoming| {
+                bot::handle_message_with_answer(incoming, |question| {
+                    let started = Instant::now();
+
+                    let results = index
+                        .search(question, knowledge::MAX_PAGES, knowledge::MAX_CONTEXT_CHARS)
+                        .map_err(std::io::Error::other)?;
+
+                    eprintln!(
+                        "Retrieved {} pages, {} context characters.",
+                        results.pages.len(),
+                        results.context.chars().count()
+                    );
+
+                    let answer =
+                        llm::answer_question(&model, question, &results.context, &instructions);
+
+                    eprintln!(
+                        "Retrieval and answer stage: {:.2}s",
+                        started.elapsed().as_secs_f64()
+                    );
+
+                    answer
+                })
+            });
 
             if let Err(error) = result {
-                eprintln!("Socket error: {error}");
+                eprintln!("Socket client error: {error}");
+                std::process::exit(1);
             }
         }
 
@@ -233,6 +279,60 @@ fn main() {
             }
         }
 
+        "--ask" => {
+            if args.len() < 3 {
+                eprintln!("Usage: signal-knowledge-bot --ask <database.db> <question>");
+                std::process::exit(1);
+            }
+
+            let question = args[2..].join(" ");
+
+            if question.trim().is_empty() {
+                eprintln!("The question cannot be empty.");
+                std::process::exit(1);
+            }
+
+            let instructions = load_answering_instructions();
+
+            let index = match knowledge::SqliteIndex::open(Path::new(&args[1])) {
+                Ok(index) => index,
+                Err(error) => {
+                    eprintln!("Failed to open index: {error}");
+                    std::process::exit(1);
+                }
+            };
+
+            let results = match index.search(
+                &question,
+                knowledge::MAX_PAGES,
+                knowledge::MAX_CONTEXT_CHARS,
+            ) {
+                Ok(results) => results,
+                Err(error) => {
+                    eprintln!("Retrieval failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+
+            eprintln!(
+                "Retrieved {} pages, {} context characters.",
+                results.pages.len(),
+                results.context.chars().count()
+            );
+
+            let started = Instant::now();
+
+            match llm::answer_question(&llm::Agy, &question, &results.context, &instructions) {
+                Ok(answer) => println!("{answer}"),
+                Err(error) => {
+                    eprintln!("Answer generation failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+
+            eprintln!("Answer stage: {:.2}s", started.elapsed().as_secs_f64());
+        }
+
         "--search-index" => {
             if args.len() < 3 {
                 eprintln!("Usage: signal-knowledge-bot --search-index <database.db> <question>");
@@ -306,6 +406,18 @@ fn main() {
 
             println!("Destination: {:?}", outgoing.destination);
             println!("Reply: {}", outgoing.text);
+        }
+    }
+}
+
+fn load_answering_instructions() -> String {
+    let path = Path::new("config/answering.txt");
+
+    match llm::load_instructions(path) {
+        Ok(instructions) => instructions,
+        Err(error) => {
+            eprintln!("Failed to load {}: {error}", path.display());
+            std::process::exit(1);
         }
     }
 }
