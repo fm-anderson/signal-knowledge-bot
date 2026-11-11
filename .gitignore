@@ -2,3 +2,4 @@
 /manuals
 /knowledge.db*
 .DS_Store
+.env

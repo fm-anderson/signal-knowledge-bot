@@ -47,7 +47,7 @@ fn main() {
                 }
             };
 
-            let model = llm::Agy;
+            let model = load_language_model();
 
             let result = signal::run_socket_client(Path::new(&args[1]), |incoming| {
                 bot::handle_message_with_answer(incoming, |question| {
@@ -63,8 +63,16 @@ fn main() {
                         results.context.chars().count()
                     );
 
-                    let answer =
-                        llm::answer_question(&model, question, &results.context, &instructions);
+                    let answer = llm::answer_question(
+                        model.as_ref(),
+                        question,
+                        results.pages.iter().map(|page| llm::Source {
+                            document: &page.source,
+                            page: page.page_number,
+                            text: &page.text,
+                        }),
+                        &instructions,
+                    );
 
                     eprintln!(
                         "Retrieval and answer stage: {:.2}s",
@@ -285,6 +293,7 @@ fn main() {
                 std::process::exit(1);
             }
 
+            let model = load_language_model();
             let question = args[2..].join(" ");
 
             if question.trim().is_empty() {
@@ -322,7 +331,16 @@ fn main() {
 
             let started = Instant::now();
 
-            match llm::answer_question(&llm::Agy, &question, &results.context, &instructions) {
+            match llm::answer_question(
+                model.as_ref(),
+                &question,
+                results.pages.iter().map(|page| llm::Source {
+                    document: &page.source,
+                    page: page.page_number,
+                    text: &page.text,
+                }),
+                &instructions,
+            ) {
                 Ok(answer) => println!("{answer}"),
                 Err(error) => {
                     eprintln!("Answer generation failed: {error}");
@@ -417,6 +435,16 @@ fn load_answering_instructions() -> String {
         Ok(instructions) => instructions,
         Err(error) => {
             eprintln!("Failed to load {}: {error}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn load_language_model() -> Box<dyn llm::LanguageModel> {
+    match llm::load_model() {
+        Ok(model) => model,
+        Err(error) => {
+            eprintln!("Failed to configure language model: {error}");
             std::process::exit(1);
         }
     }
