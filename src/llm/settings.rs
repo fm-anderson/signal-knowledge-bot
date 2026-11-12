@@ -1,4 +1,4 @@
-use super::{LanguageModel, agy::Agy, groq::Groq};
+use super::{LanguageModel, agy::Agy, groq::Groq, openrouter::OpenRouter};
 use std::collections::HashMap;
 use std::io;
 
@@ -20,10 +20,23 @@ pub fn load_model() -> io::Result<Box<dyn LanguageModel>> {
                 .unwrap_or_else(|| "openai/gpt-oss-120b".to_string());
 
             let groq = Groq::new(&key, model.clone())?;
+
             eprintln!("Provider: groq | Model: {model}");
             Ok(Box::new(groq))
         }
-        _ => Err(invalid("LLM_PROVIDER must be agy or groq")),
+        "openrouter" => {
+            let key = setting(&values, "OPENROUTER_KEY")?
+                .ok_or_else(|| invalid("OPENROUTER_KEY is required for OpenRouter"))?;
+
+            let model = setting(&values, "OPENROUTER_MODEL")?
+                .unwrap_or_else(|| "google/gemma-4-31b-it:free".to_string());
+
+            let openrouter = OpenRouter::new(&key, model.clone())?;
+
+            eprintln!("Provider: openrouter | Model: {model}");
+            Ok(Box::new(openrouter))
+        }
+        _ => Err(invalid("LLM_PROVIDER must be agy, groq, or openrouter")),
     }
 }
 

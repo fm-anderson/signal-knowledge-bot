@@ -280,3 +280,64 @@ fn diagnostic_complete_licensing_section() {
         started.elapsed().as_secs_f64()
     );
 }
+
+#[test]
+fn openrouter_request_separates_roles_and_preserves_input() {
+    let instructions = "Use only the supplied sources.";
+    let input = r#"{"user_request":"A question","sources":[]}"#;
+    let model = "google/gemma-4-31b-it:free";
+
+    let body = super::openrouter::build_request(model, instructions, input);
+
+    assert_eq!(body["model"], model);
+    assert_eq!(body["stream"], false);
+    assert_eq!(body["max_tokens"], 4096);
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], instructions);
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], input);
+}
+
+#[test]
+fn openrouter_http_errors_show_selected_details_and_redact_key() {
+    let body = serde_json::json!({
+        "error": {
+            "code": 429,
+            "message": "Capacity exceeded\ncredential=test-secret",
+            "metadata": {
+                "provider_name": "Example provider",
+                "raw": "Raw provider data must not be printed"
+            }
+        }
+    });
+
+    let error = super::openrouter::http_error(
+        429,
+        Some("30"),
+        &serde_json::to_vec(&body).unwrap(),
+        "test-secret",
+    )
+    .to_string();
+
+    assert!(error.contains("OpenRouter HTTP 429"));
+    assert!(error.contains("API code: 429"));
+    assert!(error.contains("Capacity exceeded"));
+    assert!(error.contains("[REDACTED]"));
+    assert!(error.contains("Provider: Example provider"));
+    assert!(error.contains("Retry-After: 30"));
+    assert!(!error.contains("test-secret"));
+    assert!(!error.contains("Raw provider data"));
+    assert!(!error.contains('\n'));
+
+    let non_json = super::openrouter::http_error(
+        503,
+        None,
+        b"<html>Unstructured provider response</html>",
+        "test-secret",
+    )
+    .to_string();
+
+    assert!(non_json.contains("OpenRouter HTTP 503"));
+    assert!(!non_json.contains("<html>"));
+}

@@ -1,5 +1,6 @@
 mod agy;
 mod groq;
+mod openrouter;
 mod settings;
 
 #[cfg(test)]
