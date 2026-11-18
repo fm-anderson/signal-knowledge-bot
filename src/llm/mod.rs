@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub use settings::load_model;
 
-const NO_EVIDENCE: &str = "I cannot find the answer in the supplied documents.";
+pub(crate) const NO_EVIDENCE: &str = "I cannot find the answer in the authorized documents.";
 
 pub trait LanguageModel {
     fn generate(&self, instructions: &str, input: &str) -> io::Result<String>;
@@ -93,7 +93,7 @@ fn document_name(document: &str) -> &str {
         .unwrap_or(document)
 }
 
-fn render_citations(answer: &str, sources: &[Source<'_>]) -> io::Result<String> {
+pub(crate) fn render_citations(answer: &str, sources: &[Source<'_>]) -> io::Result<String> {
     let normalized = answer.replace('【', "[").replace('】', "]");
     let answer = normalized.trim();
 

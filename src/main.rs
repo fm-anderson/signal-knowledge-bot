@@ -1,7 +1,9 @@
 mod bot;
+mod context_eval;
 mod knowledge;
 mod llm;
 mod signal;
+mod smart_rag;
 
 use std::path::Path;
 use std::time::Instant;
@@ -63,16 +65,34 @@ fn main() {
                         results.context.chars().count()
                     );
 
-                    let answer = llm::answer_question(
-                        model.as_ref(),
-                        question,
-                        results.pages.iter().map(|page| llm::Source {
-                            document: &page.source,
-                            page: page.page_number,
-                            text: &page.text,
-                        }),
-                        &instructions,
-                    );
+                    let answer = if smart_rag::enabled() {
+                        smart_rag::answer(
+                            &index,
+                            model.as_ref(),
+                            question,
+                            &instructions,
+                            results
+                                .pages
+                                .into_iter()
+                                .map(|page| smart_rag::Page {
+                                    document: page.source,
+                                    number: page.page_number,
+                                    text: page.text,
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        llm::answer_question(
+                            model.as_ref(),
+                            question,
+                            results.pages.iter().map(|page| llm::Source {
+                                document: &page.source,
+                                page: page.page_number,
+                                text: &page.text,
+                            }),
+                            &instructions,
+                        )
+                    };
 
                     eprintln!(
                         "Retrieval and answer stage: {:.2}s",
@@ -268,6 +288,68 @@ fn main() {
             }
         }
 
+        "--contextualize-index" => {
+            if args.len() < 2 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --contextualize-index <database.db> [--model MODEL] [--max-pages N]"
+                );
+                std::process::exit(1);
+            }
+            let path = Path::new(&args[1]);
+            let mut model = "gemini-3.8-flash-low";
+            let mut max_pages = 10usize;
+            let mut position = 2;
+            while position < args.len() {
+                match args[position].as_str() {
+                    "--model" => {
+                        let Some(value) = args.get(position + 1) else {
+                            eprintln!("Missing value for --model");
+                            std::process::exit(1);
+                        };
+                        if value.trim().is_empty() || value.starts_with("--") {
+                            eprintln!("Invalid model name");
+                            std::process::exit(1);
+                        }
+                        model = value;
+                        position += 2;
+                    }
+                    "--max-pages" => {
+                        let Some(value) = args.get(position + 1) else {
+                            eprintln!("Missing value for --max-pages");
+                            std::process::exit(1);
+                        };
+                        max_pages = match value.parse::<usize>() {
+                            Ok(n) if n > 0 && n <= 50 => n,
+                            _ => {
+                                eprintln!("--max-pages must be between 1 and 50");
+                                std::process::exit(1);
+                            }
+                        };
+                        position += 2;
+                    }
+                    other => {
+                        eprintln!("Unknown contextualization option: {other}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let started = Instant::now();
+            eprintln!(
+                "Contextualizing {} using {model} (up to {max_pages} pages)",
+                path.display()
+            );
+            match knowledge::SqliteIndex::contextualize_with_agy(path, model, max_pages) {
+                Ok((pages, chunks)) => {
+                    println!("Complete: {pages} PDF pages, {chunks} chunks contextualized");
+                    println!("Elapsed: {:.2}s", started.elapsed().as_secs_f64());
+                }
+                Err(error) => {
+                    eprintln!("Contextualization failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         "--build-index" => {
             if args.len() != 3 {
                 eprintln!("Usage: signal-knowledge-bot --build-index <manuals-dir> <database.db>");
@@ -331,16 +413,36 @@ fn main() {
 
             let started = Instant::now();
 
-            match llm::answer_question(
-                model.as_ref(),
-                &question,
-                results.pages.iter().map(|page| llm::Source {
-                    document: &page.source,
-                    page: page.page_number,
-                    text: &page.text,
-                }),
-                &instructions,
-            ) {
+            let answer = if smart_rag::enabled() {
+                smart_rag::answer(
+                    &index,
+                    model.as_ref(),
+                    &question,
+                    &instructions,
+                    results
+                        .pages
+                        .into_iter()
+                        .map(|page| smart_rag::Page {
+                            document: page.source,
+                            number: page.page_number,
+                            text: page.text,
+                        })
+                        .collect(),
+                )
+            } else {
+                llm::answer_question(
+                    model.as_ref(),
+                    &question,
+                    results.pages.iter().map(|page| llm::Source {
+                        document: &page.source,
+                        page: page.page_number,
+                        text: &page.text,
+                    }),
+                    &instructions,
+                )
+            };
+
+            match answer {
                 Ok(answer) => println!("{answer}"),
                 Err(error) => {
                     eprintln!("Answer generation failed: {error}");
@@ -396,6 +498,20 @@ fn main() {
 
             println!("Index load time: {load_time:?}");
             println!("Search and context time: {:?}", search_start.elapsed());
+        }
+
+        "--eval-context" => {
+            if args.len() != 3 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --eval-context <database.db> <evaluation.json>"
+                );
+                std::process::exit(1);
+            }
+
+            if let Err(error) = context_eval::run(Path::new(&args[1]), Path::new(&args[2])) {
+                eprintln!("Contextual evaluation failed: {error}");
+                std::process::exit(1);
+            }
         }
 
         "--eval-index" => {
