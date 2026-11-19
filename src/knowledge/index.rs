@@ -73,6 +73,10 @@ pub struct SearchResult {
 }
 
 impl SqliteIndex {
+    pub(crate) fn navigation_connection(&self) -> &Connection {
+        &self.connection
+    }
+
     pub fn build(directory: &Path, database_path: &Path) -> Result<(usize, usize), Box<dyn Error>> {
         let documents = load_pdf_directory(directory)?;
         let terminology = Terminology::load_optional(directory)?;

@@ -46,21 +46,21 @@ pub fn catalog(database: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Section {
-    chapter: usize,
-    section: usize,
-    title: String,
-    start_page: i64,
-    end_page: i64,
+pub(crate) struct Section {
+    pub(crate) chapter: usize,
+    pub(crate) section: usize,
+    pub(crate) title: String,
+    pub(crate) start_page: i64,
+    pub(crate) end_page: i64,
 }
 
 #[derive(Debug)]
-struct Chapter {
-    number: usize,
-    title: Option<String>,
-    start_page: i64,
-    end_page: i64,
-    sections: Vec<Section>,
+pub(crate) struct Chapter {
+    pub(crate) number: usize,
+    pub(crate) title: Option<String>,
+    pub(crate) start_page: i64,
+    pub(crate) end_page: i64,
+    pub(crate) sections: Vec<Section>,
 }
 
 fn clean_spaces(input: &str) -> String {
@@ -71,7 +71,7 @@ fn clean_spaces(input: &str) -> String {
 // The text after the label may contain an explanatory sentence; only its heading
 // clause is retained. A bare numbered requirement is not necessarily a heading,
 // so the output remains an extraction-derived candidate until reviewed.
-fn section_heading(line: &str) -> Option<(usize, usize, String)> {
+pub(crate) fn section_heading(line: &str) -> Option<(usize, usize, String)> {
     let line = line.trim();
     if line.len() > 400 || line.contains("....") {
         return None;
@@ -174,7 +174,7 @@ fn find_body_start(pages: &[(i64, String)]) -> i64 {
         .unwrap_or(first_page)
 }
 
-fn build_outline(pages: &[(i64, String)]) -> Vec<Chapter> {
+pub(crate) fn build_outline(pages: &[(i64, String)]) -> Vec<Chapter> {
     let Some(last_page) = pages.last().map(|(page, _)| *page) else {
         return Vec::new();
     };

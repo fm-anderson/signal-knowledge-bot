@@ -1,8 +1,10 @@
 mod bot;
 mod context_eval;
 mod document_map;
+mod document_summary;
 mod knowledge;
 mod llm;
+mod navigation;
 mod signal;
 mod smart_rag;
 
@@ -521,6 +523,81 @@ fn main() {
             }
             if let Err(error) = document_map::outline(Path::new(&args[1]), &args[2]) {
                 eprintln!("Document outline failed: {error}");
+                std::process::exit(1);
+            }
+        }
+
+        "--summarize-documents" => {
+            if args.len() < 2 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --summarize-documents <database.db> [--model MODEL] [--max-items N] [--document DOCUMENT]"
+                );
+                std::process::exit(1);
+            }
+            let mut model = "gemini-3.8-flash-low";
+            let mut max_items = 5usize;
+            let mut document_filter: Option<&str> = None;
+            let mut position = 2;
+            while position < args.len() {
+                match args[position].as_str() {
+                    "--model" if args.get(position + 1).is_some() => {
+                        model = &args[position + 1];
+                        position += 2;
+                    }
+                    "--document" if args.get(position + 1).is_some() => {
+                        document_filter = Some(&args[position + 1]);
+                        position += 2;
+                    }
+                    "--max-items" if args.get(position + 1).is_some() => {
+                        max_items = match args[position + 1].parse::<usize>() {
+                            Ok(n) if (1..=50).contains(&n) => n,
+                            _ => {
+                                eprintln!("--max-items must be between 1 and 50");
+                                std::process::exit(1);
+                            }
+                        };
+                        position += 2;
+                    }
+                    other => {
+                        eprintln!("Invalid summary option: {other}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if model.trim().is_empty() || model.starts_with("--") {
+                eprintln!("Invalid model name");
+                std::process::exit(1);
+            }
+            if let Err(error) =
+                document_summary::generate(Path::new(&args[1]), model, max_items, document_filter)
+            {
+                eprintln!("Summary generation failed: {error}");
+                std::process::exit(1);
+            }
+        }
+
+        "--inspect-section-excerpt" => {
+            if args.len() != 4 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --inspect-section-excerpt <database.db> <document-filename> <chapter.section>"
+                );
+                std::process::exit(1);
+            }
+            if let Err(error) =
+                document_summary::inspect_excerpt(Path::new(&args[1]), &args[2], &args[3])
+            {
+                eprintln!("Section inspection failed: {error}");
+                std::process::exit(1);
+            }
+        }
+
+        "--document-summaries" => {
+            if args.len() != 2 {
+                eprintln!("Usage: signal-knowledge-bot --document-summaries <database.db>");
+                std::process::exit(1);
+            }
+            if let Err(error) = document_summary::show(Path::new(&args[1])) {
+                eprintln!("Document summaries failed: {error}");
                 std::process::exit(1);
             }
         }
