@@ -1,5 +1,6 @@
 mod bot;
 mod context_eval;
+mod document_map;
 mod knowledge;
 mod llm;
 mod signal;
@@ -498,6 +499,30 @@ fn main() {
 
             println!("Index load time: {load_time:?}");
             println!("Search and context time: {:?}", search_start.elapsed());
+        }
+
+        "--document-catalog" => {
+            if args.len() != 2 {
+                eprintln!("Usage: signal-knowledge-bot --document-catalog <database.db>");
+                std::process::exit(1);
+            }
+            if let Err(error) = document_map::catalog(Path::new(&args[1])) {
+                eprintln!("Document catalog failed: {error}");
+                std::process::exit(1);
+            }
+        }
+
+        "--document-outline" => {
+            if args.len() != 3 {
+                eprintln!(
+                    "Usage: signal-knowledge-bot --document-outline <database.db> <document-filename>"
+                );
+                std::process::exit(1);
+            }
+            if let Err(error) = document_map::outline(Path::new(&args[1]), &args[2]) {
+                eprintln!("Document outline failed: {error}");
+                std::process::exit(1);
+            }
         }
 
         "--eval-context" => {
